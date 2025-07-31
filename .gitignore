@@ -1,3 +1,4 @@
 data/*
 !data/preprocessing_yuran.ipynb
 !data/experiment_data_from_yuran
+!data/*.py
