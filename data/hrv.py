@@ -10,51 +10,57 @@ from scipy.signal import iirnotch, filtfilt
 from typing import Tuple, List, Optional
 from tqdm import tqdm
 from functools import lru_cache
+# ======================================== Multiprocessing ======================================== 
+import tempfile
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+from logging.handlers import QueueHandler, QueueListener
+from functools import lru_cache
 
-# 只檢查一次，不在每個 epoch hasattr
-_NK_HAS_POWERLINE = hasattr(nk, 'powerline_filter')  # 新增：快取能力偵測結果（不影響計算結果）
-
-@lru_cache(maxsize=64)
-def _cached_notch_ba(fs: float, freq: float, Q: float):
-    # 新增：快取 notch 濾波器係數（完全相同的輸入 → 係數相同，數值不變）
-    return iirnotch(freq, Q, fs)
-
-
+# === 變數定義 ===
 LOGS = "logs"
 MATCH = 'Z:'
 HRV = os.path.join(LOGS,"hrv")
 time_label = ['1_3','4_6','7_9']
 
+# === 既有旗標（保留），但新增能力快取與 notch 係數快取 ===
 _powerline_warning_printed = False
+_NK_HAS_POWERLINE = hasattr(nk, 'powerline_filter')  # 新增：只檢查一次
 
-if os.path.isdir(LOGS):
-    print(f"{LOGS} folder exist.")
-else:
-    os.makedirs("logs", exist_ok=True)
-    print(f"{LOGS} folder doesn't exist, creating new {LOGS}")
+@lru_cache(maxsize=64)
+def _cached_notch_ba(fs: float, freq: float, Q: float):
+    # 新增：快取 notch 濾波器係數（完全相同輸入 → 係數唯一）
+    return iirnotch(freq, Q, fs)
 
-if os.path.isdir(HRV):
-    print(f"{HRV} folder exist.")
-else:
-    os.makedirs(HRV, exist_ok=True)
-    print(f"{HRV} folder doesn't exist, creating new {HRV}")
-# 建立 Logger
-try:
-    logger = logging.getLogger("data_clean")
-    logger.setLevel(logging.WARNING)  # WARNING 以上都會被記錄
 
-    # 建立 FileHandler，寫入 logs/clean.log
-    fh = logging.FileHandler(f"{LOGS}/hrv.log", mode="w", encoding="utf-8")
-    # 只輸出訊息本身：SUBJECT_ID REASON
-    formatter = logging.Formatter("%(message)s")
-    fh.setFormatter(formatter)
 
-    # 避免重複加入 handler
-    if not logger.handlers:
-        logger.addHandler(fh)
-    print("Logger module create success.")
-except Exception as e:
-    raise ValueError(e)
+# === Logger 初始化（改）===
+# 原本在 import 階段就建立 FileHandler → 會造成多程序同檔寫入競爭
+# 改為：主程序在 main() 裡建立 QueueListener；子程序只綁 QueueHandler
+logger = logging.getLogger("data_clean")
+logger.setLevel(logging.WARNING)  # 保留原等級；實際 handler 於 main()/worker 設定
+
+def setup_main_logging(logfile: str):
+    """
+    在主程序啟動一個 QueueListener，統一從 queue 收到的 logs 寫入到 logfile。
+    """
+    log_queue = mp.Queue(-1)
+    file_handler = logging.FileHandler(logfile, mode="w", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    listener = QueueListener(log_queue, file_handler)
+    listener.start()
+    return log_queue, listener
+
+def setup_worker_logging(log_queue: mp.Queue):
+    """
+    在子程序中，把 logger 綁到 QueueHandler，所有 log 丟回主程序寫檔。
+    """
+    global logger
+    # 清掉繼承的 handlers，避免重複
+    logger.handlers = []
+    qh = QueueHandler(log_queue)
+    logger.addHandler(qh)
+    logger.setLevel(logging.WARNING)
 
 def record_log(subject_id: str, reason: str):
     """
@@ -95,8 +101,7 @@ def process_patient(patient: pd.Series):
     for idx, (start_sec, end_sec) in enumerate(sample_regions):
         # 原本每 epoch 做一次 concat，改成先收集在 list，最後一次性 concat（結果完全相同）
         hrv_rows = []  # 新增：暫存各 epoch 的 DataFrame
-        # valid_hrv_metric_dicts = []
-        valid_hrv_metric_df = pd.DataFrame()
+        
         # 6.1 檢查該時間段是否存在
         if start_sec is None or end_sec is None:
             record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠 signal (少於 5400s)")
@@ -126,11 +131,13 @@ def process_patient(patient: pd.Series):
 
             # 6.3.1 計算 epocch 訊號起點與終點 idx
             start_idx = int(round(rel*fs))
+            if start_idx >= len_signals:
+                break
+
             end_idx = min(int(round((rel+epoch_len) * fs)),len(signals)) # 避免結束超出時間段
             epoch_signals = signals[start_idx:end_idx]
 
-            if start_idx >= len_signals:
-                break
+            
 
 
             # 6.3.2 過濾 signal 與計算 RR peaks
@@ -171,8 +178,7 @@ def process_patient(patient: pd.Series):
             hrv_rows.append(hrv_metrics)
 
         valid_hrv_metric_df = pd.concat(hrv_rows, axis=0, ignore_index=True) if hrv_rows else pd.DataFrame()
-        valid_hrv_metric_df.to_csv(os.path.join(HRV,f"{subject_id}_{time_label[idx]}_hrv.csv"),index=False)
-
+        _to_csv_atomic(valid_hrv_metric_df, os.path.join(HRV,f"{subject_id}_{time_label[idx]}_hrv.csv"))
             # 解讀 hrv_metrics 並轉換為 dict 格式 (根據neurokit2 版本回傳可能是 dict or pd.DataFrame)
             # print(f'HRV metric type {type(hrv_metrics)}')
             # if isinstance(hrv_metrics, pd.DataFrame):
@@ -205,15 +211,12 @@ def main(target_path: str):
     - df: pd.Dataframe
     """
     os.makedirs(LOGS, exist_ok = True)
+    os.makedirs(HRV, exist_ok = True)
 
-    df = pd.read_csv(target_path, usecols=['SUBJECT_ID','HADM_ID','ICUSTAY_ID',
-                                           'INTIME','OUTTIME','ADMITTIME','DISCHTIME',
-                                           'DEATHTIME','T0','T1_lead2','Total_lead2_sec',
-                                           'PREFIX','FOLDER','HEADER'],
-                                           dtype={
-                                               'SUBJECT_ID':int,'HADM_ID':int,'ICUSTAY_ID':int,
-                                               'PREFIX':str,'FOLDER':str,'HEADER':str
-                                           })
+    df = pd.read_csv(target_path, dtype={
+                                    'SUBJECT_ID':int,'HADM_ID':int,'ICUSTAY_ID':int,
+                                    'PREFIX':str,'FOLDER':str,'HEADER':str
+                                })
 
     time_cols = ['INTIME','OUTTIME','ADMITTIME','DISCHTIME','DEATHTIME','T0','T1_lead2']
     for col in time_cols:
@@ -238,15 +241,28 @@ def main(target_path: str):
 
     masks = [[],[],[]] # following the order : 1-3, 4-6, 7-9
 
+    # === 新增：主程序日誌 listener（集中寫檔） ===
+    log_queue, log_listener = setup_main_logging(f"{LOGS}/hrv.log")
 
-    for _ , patient in tqdm(df.iterrows(), total=len(df)):
-        total_valid_hrv_metric_df=process_patient(patient)
+    try:
+        # 轉成 dict 列（序列化成本較小）
+        rows = df.to_dict('records')
+        workers = max(1, os.cpu_count() or 1)
 
-        for idx, hrv_df in total_valid_hrv_metric_df.items():
-            if hrv_df.empty:
-                masks[idx].append(False)
-            else:
-                masks[idx].append(True)
+        with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=setup_worker_logging,
+                initargs=(log_queue,)
+        ) as ex:
+            it = ex.map(_worker_process_patient, rows, chunksize=1)
+            for have_1_3, have_4_6, have_7_9 in tqdm(
+                    it, total=len(rows), desc="HRV per patient", unit="pt"):
+                masks[0].append(have_1_3)
+                masks[1].append(have_4_6)
+                masks[2].append(have_7_9)
+    finally:
+        # 關閉 listener，確保所有 log 刷寫完成
+        log_listener.stop()
 
     for idx, time in enumerate(time_label):
         df[f"have_{time}_hrv"] = masks[idx]
@@ -269,7 +285,7 @@ def notch_filter(signal: np.ndarray,
     Returns
     - np.ndarray: 已濾波之訊號，資料型別與輸入相同。
     """
-    b, a = _cached_notch_ba(fs, freq, Q)  # ← 改這一行
+    b, a = _cached_notch_ba(fs, freq, Q)  # 改：使用快取係數
     filtered_signal = filtfilt(b, a, signal)
     return filtered_signal
 
@@ -291,14 +307,13 @@ def apply_filters(signal: np.ndarray,
     """
     filtered_signal = nk.signal_filter(signal, sampling_rate=fs, lowcut=0.5,
                                        method="butterworth", order=5)
-    # 改動：使用一次性的能力快取 _NK_HAS_POWERLINE
     if _NK_HAS_POWERLINE:
         filtered_signal = nk.powerline_filter(filtered_signal, sampling_rate=fs,
                                               method='notch', line_frequency=notch_freq)
     else:
         global _powerline_warning_printed
         if not _powerline_warning_printed:
-            print("[WARNING] nk.powerline_filter not found, using custom notch filter.")
+            # print("[WARNING] nk.powerline_filter not found, using custom notch filter.")
             _powerline_warning_printed = True
         filtered_signal = notch_filter(filtered_signal, fs, freq=notch_freq, Q=notch_Q)
     return filtered_signal
@@ -472,10 +487,13 @@ def concat_signals(hdr, rec_dir: str, channel: str="II")->Tuple[float, List, Lis
             segments.append(None)
             continue
 
+        if name.split("_")[-1] =="layout":
+            continue
         try:
             h = wfdb.rdrecord(os.path.join(rec_dir, name)) # including metadata and ecg signal
         except Exception as e:
-            print(f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
+            record_log(os.path.split()[-1],f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
+            # print(f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
             durations.append(seg_len / hdr.fs)
             segments.append(None)
             continue
@@ -509,7 +527,33 @@ def concat_signals(hdr, rec_dir: str, channel: str="II")->Tuple[float, List, Lis
 
     return final_fs, segments, durations
 
+# === Multiprocessing Function :  原子寫入 CSV（新增）===
+def _to_csv_atomic(df: pd.DataFrame, out_path: str):
+    """
+    安全寫檔：先寫暫存檔，再原子替換，避免平行寫入產生半檔案。
+    """
+    out_dir = os.path.dirname(out_path)
+    os.makedirs(out_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile('w', delete=False, dir=out_dir, suffix='.tmp', encoding='utf-8', newline='') as tmp:
+        df.to_csv(tmp.name, index=False)
+        tmp_name = tmp.name
+    os.replace(tmp_name, out_path)
+
+# === Worker 包裝函式（新增）：只回傳 3 個布林，避免把整個 dict/DataFrame pickling 回主程序 ===
+def _worker_process_patient(patient_dict: dict) -> Tuple[bool, bool, bool]:
+    """
+    子程序呼叫：執行 process_patient()，只把各時窗是否有 HRV 結果（非空）回傳。
+    減少跨程序傳輸成本，CSV 已在子程序內完成寫入。
+    """
+    patient = pd.Series(patient_dict)
+    result = process_patient(patient)   # {0: df, 1: df, 2: df}
+    flags = []
+    for i in range(3):
+        df_i = result.get(i, pd.DataFrame())
+        flags.append(not df_i.empty)
+    return tuple(flags)  # (have_1_3, have_4_6, have_7_9)
+
 if __name__=="__main__":
-    target_path = os.path.join(LOGS,"mort_test.csv")
+    target_path = os.path.join(LOGS,"mort_stage2_filtered.csv")
     result_df = main(target_path)
-    result_df.to_csv(os.path.join(LOGS,"mort_test_hrv.csv"))
+    result_df.to_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"),index=False)
