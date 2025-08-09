@@ -4,16 +4,64 @@ import wfdb
 import numpy as np
 import neurokit2 as nk
 import pandas as pd
+import logging
 from collections import Counter
 from scipy.signal import iirnotch, filtfilt
 from typing import Tuple, List, Optional
+from tqdm import tqdm
+from functools import lru_cache
+
+# 只檢查一次，不在每個 epoch hasattr
+_NK_HAS_POWERLINE = hasattr(nk, 'powerline_filter')  # 新增：快取能力偵測結果（不影響計算結果）
+
+@lru_cache(maxsize=64)
+def _cached_notch_ba(fs: float, freq: float, Q: float):
+    # 新增：快取 notch 濾波器係數（完全相同的輸入 → 係數相同，數值不變）
+    return iirnotch(freq, Q, fs)
+
 
 LOGS = "logs"
 MATCH = 'Z:'
-from typing import List, Optional
-import numpy as np
+HRV = os.path.join(LOGS,"hrv")
+time_label = ['1_3','4_6','7_9']
 
 _powerline_warning_printed = False
+
+if os.path.isdir(LOGS):
+    print(f"{LOGS} folder exist.")
+else:
+    os.makedirs("logs", exist_ok=True)
+    print(f"{LOGS} folder doesn't exist, creating new {LOGS}")
+
+if os.path.isdir(HRV):
+    print(f"{HRV} folder exist.")
+else:
+    os.makedirs(HRV, exist_ok=True)
+    print(f"{HRV} folder doesn't exist, creating new {HRV}")
+# 建立 Logger
+try:
+    logger = logging.getLogger("data_clean")
+    logger.setLevel(logging.WARNING)  # WARNING 以上都會被記錄
+
+    # 建立 FileHandler，寫入 logs/clean.log
+    fh = logging.FileHandler(f"{LOGS}/hrv.log", mode="w", encoding="utf-8")
+    # 只輸出訊息本身：SUBJECT_ID REASON
+    formatter = logging.Formatter("%(message)s")
+    fh.setFormatter(formatter)
+
+    # 避免重複加入 handler
+    if not logger.handlers:
+        logger.addHandler(fh)
+    print("Logger module create success.")
+except Exception as e:
+    raise ValueError(e)
+
+def record_log(subject_id: str, reason: str):
+    """
+    將不合格的資料記錄到 logs/clean.log。
+    例如： logger.warning("12345 invalid_date")
+    """
+    logger.warning(f"{subject_id} {reason}")
 
     
 def process_patient(patient: pd.Series):
@@ -34,35 +82,42 @@ def process_patient(patient: pd.Series):
 
     # 4. 該段落 signals 的品質檢測
     if not is_signal_quality_good(segments):
-        print(f"{subject_id} 's siganl is not qulified")
+        record_log(subject_id, "siganl is not qulified")
+        # print(f"{subject_id} 's siganl is not qulified")
         return
     
     # 5.計算實際擷取訊號的時間段
     sample_regions = get_sampling_regions(patient['TIME_DIFFERENCE_SEC'],durations)
 
     # 6. 針對每個時間端做長度檢測，並計算 hrv
-    time_label = ['1_3','4_6','7_9']
-    total_valid_hrv_metric_dicts = {}
+    
+    total_valid_hrv_metric_df = {}
     for idx, (start_sec, end_sec) in enumerate(sample_regions):
-        valid_hrv_metric_dicts = []
+        # 原本每 epoch 做一次 concat，改成先收集在 list，最後一次性 concat（結果完全相同）
+        hrv_rows = []  # 新增：暫存各 epoch 的 DataFrame
+        # valid_hrv_metric_dicts = []
+        valid_hrv_metric_df = pd.DataFrame()
         # 6.1 檢查該時間段是否存在
         if start_sec is None or end_sec is None:
-            print(f"{subject_id}: 在時間段 {time_label[idx]} 沒有足夠 signal (少於 5400s)")
-            total_valid_hrv_metric_dicts[idx] = valid_hrv_metric_dicts
+            record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠 signal (少於 5400s)")
+            # print(f"{subject_id}: 在時間段 {time_label[idx]} 沒有足夠 signal (少於 5400s)")
+            total_valid_hrv_metric_df[idx] = pd.DataFrame()
             continue
 
         signals = extract_time_region(segments,durations,fs,start_sec,end_sec) #1D np.ndarray
 
         # 6.2 檢查實際時間擷取的 lead 2 signals 是否真的有充足時間
         if signals is None or len(signals)/fs < 5400:
-            print(f"{subject_id}: 在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s)") 
-            total_valid_hrv_metric_dicts[idx] = valid_hrv_metric_dicts
+            record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s)")
+            # print(f"{subject_id}: 在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s)") 
+            total_valid_hrv_metric_df[idx] = pd.DataFrame()
             continue
 
         # 6.3 逐段(5 min, 300s) 計算 HRV
         cum = start_sec
         epoch_len  = 300 #5min 300s
         segments_count = -1
+        len_signals = len(signals)
 
         while(cum<= end_sec):
             rel = (cum - start_sec)
@@ -74,7 +129,7 @@ def process_patient(patient: pd.Series):
             end_idx = min(int(round((rel+epoch_len) * fs)),len(signals)) # 避免結束超出時間段
             epoch_signals = signals[start_idx:end_idx]
 
-            if start_idx >= len(signals):
+            if start_idx >= len_signals:
                 break
 
 
@@ -86,43 +141,58 @@ def process_patient(patient: pd.Series):
                 # print(f"info : {type(rpeaks_info)}: {rpeaks_info}")
                 # print(f"series: {type(r_peaks_seires)}: {r_peaks_seires}")
             except Exception as e:
-                print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 R peak 失敗: {e}")
+                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum - epoch_len} - {cum} ) 計算 R peak 失敗: {e}")
+                # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 R peak 失敗: {e}")
                 continue
             
             # 6.3.3 計算 RR intervals
             if rpeaks.size < 2:
-                print(f"有效 R peaks 過少無法計算 RR interval (at least 2)")
+                record_log(subject_id, f"有效 R peaks 過少無法計算 RR interval (at least 2, only {rpeaks.size})")
+                # print(f"有效 R peaks 過少無法計算 RR interval (at least 2)")
                 continue
 
             rr_intervals = np.diff(rpeaks) / fs  # seconds
             if len(rr_intervals) <250:
-                print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段有效 RR intervals 小於 250")
+                record_log(subject_id, f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum-epoch_len} - {cum} ) 有效 RR intervals 小於 250 (only {len(rr_intervals)})")
+                # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段有效 RR intervals 小於 250")
                 continue
 
             # 6.3.4 計算 HRV indicators
             try:
                 hrv_metrics = nk.hrv(rpeaks, sampling_rate=fs, show=False)
             except Exception as e:
-                print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 HRV 失效")
+                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum-epoch_len} - {cum} ) 計算 HRV 失效")
+                # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 HRV 失效")
                 continue
+
+            if not isinstance(hrv_metrics,pd.DataFrame):
+                raise ValueError(f'hrv metrics not pd.DataFrame, type {type(hrv_metrics)}')
+            
+            hrv_rows.append(hrv_metrics)
+
+        valid_hrv_metric_df = pd.concat(hrv_rows, axis=0, ignore_index=True) if hrv_rows else pd.DataFrame()
+        valid_hrv_metric_df.to_csv(os.path.join(HRV,f"{subject_id}_{time_label[idx]}_hrv.csv"),index=False)
 
             # 解讀 hrv_metrics 並轉換為 dict 格式 (根據neurokit2 版本回傳可能是 dict or pd.DataFrame)
-            if isinstance(hrv_metrics, pd.DataFrame):
-                hrv_metrics_dict = hrv_metrics.iloc[0].to_dict()
-            elif isinstance(hrv_metrics, dict):
-                hrv_metrics_dict = hrv_metrics
-            else:
-                hrv_metrics_dict = {}
+            # print(f'HRV metric type {type(hrv_metrics)}')
+            # if isinstance(hrv_metrics, pd.DataFrame):
+            #     valid_hrv_metric_df = pd.concat([valid_hrv_metric_df,hrv_metrics], axis=0)
+            #     hrv_metrics_dict = hrv_metrics.iloc[0].to_dict()
+            # elif isinstance(hrv_metrics, dict):
+            #     hrv_metrics_dict = hrv_metrics
+            # else:
+            #     hrv_metrics_dict = {}
             
-            if not hrv_metrics_dict:
-                print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段解析 HRV metrics dict 為空 )")
-                continue
-            else:
-                valid_hrv_metric_dicts.append(hrv_metrics_dict)
+            # if not hrv_metrics_dict:
+            #     print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段解析 HRV metrics dict 為空 )")
+            #     continue
+            # else:
+            #     valid_hrv_metric_dicts.append(hrv_metrics_dict)
+            
 
-        total_valid_hrv_metric_dicts[idx] = valid_hrv_metric_dicts
+        total_valid_hrv_metric_df[idx] = valid_hrv_metric_df
     
-    return total_valid_hrv_metric_dicts
+    return total_valid_hrv_metric_df
 
     
     
@@ -164,19 +234,24 @@ def main(target_path: str):
     )
     print(df.info())
     print(df.head())
-
-
-
         
-    count = 0
-    for _ , patient in df.iterrows():
-        result=process_patient(patient)
-        print(f"{patient['SUBJECT_ID']} : {result}")
-        if count < 3:
-            count+=1
-        else:
-            break
-        pass
+
+    masks = [[],[],[]] # following the order : 1-3, 4-6, 7-9
+
+
+    for _ , patient in tqdm(df.iterrows(), total=len(df)):
+        total_valid_hrv_metric_df=process_patient(patient)
+
+        for idx, hrv_df in total_valid_hrv_metric_df.items():
+            if hrv_df.empty:
+                masks[idx].append(False)
+            else:
+                masks[idx].append(True)
+
+    for idx, time in enumerate(time_label):
+        df[f"have_{time}_hrv"] = masks[idx]
+    
+    return df
 # ============================= HRV Function =============================
 def notch_filter(signal: np.ndarray,
                  fs: float,
@@ -194,7 +269,7 @@ def notch_filter(signal: np.ndarray,
     Returns
     - np.ndarray: 已濾波之訊號，資料型別與輸入相同。
     """
-    b, a = iirnotch(freq, Q, fs)
+    b, a = _cached_notch_ba(fs, freq, Q)  # ← 改這一行
     filtered_signal = filtfilt(b, a, signal)
     return filtered_signal
 
@@ -214,16 +289,13 @@ def apply_filters(signal: np.ndarray,
     Returns
     - np.ndarray: 經兩階段濾波後的訊號。
     """
-    # 先通過頻率濾波
     filtered_signal = nk.signal_filter(signal, sampling_rate=fs, lowcut=0.5,
                                        method="butterworth", order=5)
-    # 再做電源雜訊（notch 或 powerline_filter）
-    if hasattr(nk, 'powerline_filter'):
-        # 如果有 neurokit2.powerline_filter 就用它
+    # 改動：使用一次性的能力快取 _NK_HAS_POWERLINE
+    if _NK_HAS_POWERLINE:
         filtered_signal = nk.powerline_filter(filtered_signal, sampling_rate=fs,
                                               method='notch', line_frequency=notch_freq)
     else:
-        # 否則就用自定義的 notch
         global _powerline_warning_printed
         if not _powerline_warning_printed:
             print("[WARNING] nk.powerline_filter not found, using custom notch filter.")
@@ -438,5 +510,6 @@ def concat_signals(hdr, rec_dir: str, channel: str="II")->Tuple[float, List, Lis
     return final_fs, segments, durations
 
 if __name__=="__main__":
-    target_path = os.path.join(LOGS,"surv_stage2_filtered_with_wave_id.csv")
-    main(target_path)
+    target_path = os.path.join(LOGS,"mort_test.csv")
+    result_df = main(target_path)
+    result_df.to_csv(os.path.join(LOGS,"mort_test_hrv.csv"))
