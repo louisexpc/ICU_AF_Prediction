@@ -10,12 +10,14 @@ from scipy.signal import iirnotch, filtfilt
 from typing import Tuple, List, Optional
 from tqdm import tqdm
 from functools import lru_cache
+import datetime
 # ======================================== Multiprocessing ======================================== 
 import tempfile
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from logging.handlers import QueueHandler, QueueListener
 from functools import lru_cache
+from itertools import repeat
 
 # === 變數定義 ===
 LOGS = "logs"
@@ -70,7 +72,7 @@ def record_log(subject_id: str, reason: str):
     logger.warning(f"{subject_id} {reason}")
 
     
-def process_patient(patient: pd.Series):
+def process_patient(patient: pd.Series,prefix:str):
 
     # 1. 路徑處理
     subject_id = patient['SUBJECT_ID']
@@ -96,7 +98,7 @@ def process_patient(patient: pd.Series):
     sample_regions = get_sampling_regions(patient['TIME_DIFFERENCE_SEC'],durations)
 
     # 6. 針對每個時間端做長度檢測，並計算 hrv
-    
+    total_length_sec = sum(durations) # 計算時間標記
     total_valid_hrv_metric_df = {}
     for idx, (start_sec, end_sec) in enumerate(sample_regions):
         # 原本每 epoch 做一次 concat，改成先收集在 list，最後一次性 concat（結果完全相同）
@@ -113,7 +115,10 @@ def process_patient(patient: pd.Series):
 
         # 6.2 檢查實際時間擷取的 lead 2 signals 是否真的有充足時間
         if signals is None or len(signals)/fs < 5400:
-            record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s)")
+            if signals is not None:
+                record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s, 只有 {len(signals)/fs})")
+            else:
+                record_log(subject_id, f"在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s, None)")
             # print(f"{subject_id}: 在時間段 {time_label[idx]} 沒有足夠多真實 lead 2 signal (少於 5400s)") 
             total_valid_hrv_metric_df[idx] = pd.DataFrame()
             continue
@@ -123,6 +128,7 @@ def process_patient(patient: pd.Series):
         epoch_len  = 300 #5min 300s
         segments_count = -1
         len_signals = len(signals)
+
 
         while(cum<= end_sec):
             rel = (cum - start_sec)
@@ -148,19 +154,19 @@ def process_patient(patient: pd.Series):
                 # print(f"info : {type(rpeaks_info)}: {rpeaks_info}")
                 # print(f"series: {type(r_peaks_seires)}: {r_peaks_seires}")
             except Exception as e:
-                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum - epoch_len} - {cum} ) 計算 R peak 失敗: {e}")
+                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(total_length_sec-(cum-epoch_len))))} - {str(datetime.timedelta(seconds=(total_length_sec-cum)))} ) 計算 R peak 失敗: {e}")
                 # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 R peak 失敗: {e}")
                 continue
             
             # 6.3.3 計算 RR intervals
             if rpeaks.size < 2:
-                record_log(subject_id, f"有效 R peaks 過少無法計算 RR interval (at least 2, only {rpeaks.size})")
+                record_log(subject_id, f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(total_length_sec-(cum-epoch_len))))} - {str(datetime.timedelta(seconds=(total_length_sec-cum)))} ) 有效 R peaks 過少無法計算 RR interval (at least 2, only {rpeaks.size})")
                 # print(f"有效 R peaks 過少無法計算 RR interval (at least 2)")
                 continue
 
             rr_intervals = np.diff(rpeaks) / fs  # seconds
             if len(rr_intervals) <250:
-                record_log(subject_id, f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum-epoch_len} - {cum} ) 有效 RR intervals 小於 250 (only {len(rr_intervals)})")
+                record_log(subject_id, f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(total_length_sec-(cum-epoch_len))))} - {str(datetime.timedelta(seconds=(total_length_sec-cum)))} ) 有效 RR intervals 小於 250 (only {len(rr_intervals)})")
                 # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段有效 RR intervals 小於 250")
                 continue
 
@@ -168,17 +174,26 @@ def process_patient(patient: pd.Series):
             try:
                 hrv_metrics = nk.hrv(rpeaks, sampling_rate=fs, show=False)
             except Exception as e:
-                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {cum-epoch_len} - {cum} ) 計算 HRV 失效")
+                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(total_length_sec-(cum-epoch_len))))} - {str(datetime.timedelta(seconds=(total_length_sec-cum)))} ) 計算 HRV 失效")
                 # print(f"[Error] {subject_id} in time segment {time_label[idx]} 第 {segments_count} 段計算 HRV 失效")
                 continue
 
             if not isinstance(hrv_metrics,pd.DataFrame):
                 raise ValueError(f'hrv metrics not pd.DataFrame, type {type(hrv_metrics)}')
             
+            if hrv_metrics.empty :
+                record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(total_length_sec-(cum-epoch_len))))} - {str(datetime.timedelta(seconds=(total_length_sec-cum)))} ) 共具有 RR Intervals {len(rr_intervals)}, 計算 HRV 失敗(DataFrame 為空)")
+                continue
+            # if len(hrv_metrics) <18:
+            #     record_log(subject_id,f"in time segment {time_label[idx]} 第 {segments_count} 段 ( {str(datetime.timedelta(seconds=(cum - epoch_len - start_sec)))} - {str(datetime.timedelta(seconds=(cum-start_sec)))} ) 共具有 RR Intervals {len(rr_intervals)}, 計算 HRV 資料不足 18 筆 (only {len(hrv_metrics)})")
+            #     continue
             hrv_rows.append(hrv_metrics)
-
-        valid_hrv_metric_df = pd.concat(hrv_rows, axis=0, ignore_index=True) if hrv_rows else pd.DataFrame()
-        _to_csv_atomic(valid_hrv_metric_df, os.path.join(HRV,f"{subject_id}_{time_label[idx]}_hrv.csv"))
+        if len(hrv_rows)<18:
+            record_log(subject_id,f"{time_label[idx]} 時間長度不滿 18 ，只有 {len(hrv_rows)}")
+            valid_hrv_metric_df = pd.DataFrame()
+        else:
+            valid_hrv_metric_df = pd.concat(hrv_rows, axis=0, ignore_index=True) if hrv_rows else pd.DataFrame()
+        _to_csv_atomic(valid_hrv_metric_df, os.path.join(HRV+f"_{prefix}",f"{subject_id}_{time_label[idx]}_hrv.csv"))
             # 解讀 hrv_metrics 並轉換為 dict 格式 (根據neurokit2 版本回傳可能是 dict or pd.DataFrame)
             # print(f'HRV metric type {type(hrv_metrics)}')
             # if isinstance(hrv_metrics, pd.DataFrame):
@@ -205,13 +220,13 @@ def process_patient(patient: pd.Series):
     
 
 
-def main(target_path: str):
+def main(target_path: str,prefix:str):
     """
     Args:
     - df: pd.Dataframe
     """
     os.makedirs(LOGS, exist_ok = True)
-    os.makedirs(HRV, exist_ok = True)
+    os.makedirs(HRV+f"_{prefix}", exist_ok = True)
 
     df = pd.read_csv(target_path, dtype={
                                     'SUBJECT_ID':int,'HADM_ID':int,'ICUSTAY_ID':int,
@@ -226,7 +241,7 @@ def main(target_path: str):
 
     """
     TIME_DIFFERENCE_MIN：就是ecg結束時間跟死亡/離開時間的差距
-    - Surv: T1_lead2 - DISCHTIME
+    - Surv: T1_lead2 - OUTTIME
     - Mort: T1_lead2 - DEATHTIME
     """
     df['TIME_DIFFERENCE_SEC'] = (
@@ -242,7 +257,7 @@ def main(target_path: str):
     masks = [[],[],[]] # following the order : 1-3, 4-6, 7-9
 
     # === 新增：主程序日誌 listener（集中寫檔） ===
-    log_queue, log_listener = setup_main_logging(f"{LOGS}/hrv.log")
+    log_queue, log_listener = setup_main_logging(f"{LOGS}/hrv_{prefix}.log")
 
     try:
         # 轉成 dict 列（序列化成本較小）
@@ -254,7 +269,7 @@ def main(target_path: str):
                 initializer=setup_worker_logging,
                 initargs=(log_queue,)
         ) as ex:
-            it = ex.map(_worker_process_patient, rows, chunksize=1)
+            it = ex.map(_worker_process_patient, rows,repeat(prefix), chunksize=1)
             for have_1_3, have_4_6, have_7_9 in tqdm(
                     it, total=len(rows), desc="HRV per patient", unit="pt"):
                 masks[0].append(have_1_3)
@@ -540,13 +555,13 @@ def _to_csv_atomic(df: pd.DataFrame, out_path: str):
     os.replace(tmp_name, out_path)
 
 # === Worker 包裝函式（新增）：只回傳 3 個布林，避免把整個 dict/DataFrame pickling 回主程序 ===
-def _worker_process_patient(patient_dict: dict) -> Tuple[bool, bool, bool]:
+def _worker_process_patient(patient_dict: dict, prefix:str) -> Tuple[bool, bool, bool]:
     """
     子程序呼叫：執行 process_patient()，只把各時窗是否有 HRV 結果（非空）回傳。
     減少跨程序傳輸成本，CSV 已在子程序內完成寫入。
     """
     patient = pd.Series(patient_dict)
-    result = process_patient(patient)   # {0: df, 1: df, 2: df}
+    result = process_patient(patient,prefix)   # {0: df, 1: df, 2: df}
     flags = []
     for i in range(3):
         df_i = result.get(i, pd.DataFrame())
@@ -554,6 +569,10 @@ def _worker_process_patient(patient_dict: dict) -> Tuple[bool, bool, bool]:
     return tuple(flags)  # (have_1_3, have_4_6, have_7_9)
 
 if __name__=="__main__":
-    target_path = os.path.join(LOGS,"mort_stage2_filtered.csv")
-    result_df = main(target_path)
-    result_df.to_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"),index=False)
+    mort_target_path = os.path.join(LOGS,"mort_stage2_filtered.csv")
+    mort_result_df = main(mort_target_path,prefix="mort")
+    mort_result_df.to_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"),index=False)
+
+    # surv_target_path = os.path.join(LOGS,"surv_stage2_filtered.csv")
+    # surv_result_df = main(surv_target_path,prefix="surv")
+    # surv_result_df.to_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"),index=False)

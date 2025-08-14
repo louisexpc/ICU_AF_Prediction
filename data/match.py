@@ -5,14 +5,10 @@ import os
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
+import re
 
 LOGS = 'logs'
 DATA_CSV = "origin_data_csv"
-
-import os
-import re
-import pandas as pd
-from typing import Optional
 
 def catch_target_icd9(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -27,7 +23,7 @@ def catch_target_icd9(df: pd.DataFrame) -> pd.DataFrame:
     - 傳回原始 df 並新增三個欄位：has_HF, has_acute_K, has_chronic_K（值為 0/1）。
     """
 
-    diagnoses_path = os.path.join(DATA_CSV, "D_ICD_DIAGNOSES.csv")
+    diagnoses_path = os.path.join(DATA_CSV, "DIAGNOSES_ICD.csv")
 
     # 讀檔（確保使用正確欄位名稱）
     try:
@@ -85,13 +81,14 @@ def catch_target_icd9(df: pd.DataFrame) -> pd.DataFrame:
     # 合併回原 df（左合併，沒命中則為 0）
     df_out = df.copy()
     # 確保 SUBJECT_ID、HADM_ID 欄位型別一致（轉成字串比較保險）
-    df_out['SUBJECT_ID'] = df_out['SUBJECT_ID'].astype(object)
-    df_out['HADM_ID'] = df_out['HADM_ID'].astype(object)
-    agg['SUBJECT_ID'] = agg['SUBJECT_ID'].astype(object)
-    agg['HADM_ID'] = agg['HADM_ID'].astype(object)
+    df_out['SUBJECT_ID'] = pd.to_numeric(df_out['SUBJECT_ID'], errors='coerce').astype('Int64')
+    df_out['HADM_ID']    = pd.to_numeric(df_out['HADM_ID'],    errors='coerce').astype('Int64')
+    agg['SUBJECT_ID'] = agg['SUBJECT_ID'].astype('Int64')
+    agg['HADM_ID']    = agg['HADM_ID'].astype('Int64')
 
     df_out = df_out.merge(agg, on=['SUBJECT_ID', 'HADM_ID'], how='left')
-
+    # agg.to_csv(os.path.join("test","agg.csv"),index=False)
+    # df_out.to_csv(os.path.join("test","test.csv"),index=False)
     # 填補沒命中的為 0，並轉為 int
     for col in ['has_HF', 'has_acute_K', 'has_chronic_K']:
         if col not in df_out.columns:
@@ -99,9 +96,9 @@ def catch_target_icd9(df: pd.DataFrame) -> pd.DataFrame:
         else:
             na_count = df_out[col].isna().sum()
             if na_count > 0:
-                print(f"Column '{col}' has {na_count} missing values. Filling with 0.")
+                print(f"Column '{col}' has {na_count} missing values. Filling with 0. (Target ICD Code 都不具備)")
             df_out[col] = df_out[col].fillna(0).astype(int)
-
+    # df_out.to_csv(os.path.join("test","df_out.csv"),index=False)
     return df_out
 
 
@@ -109,26 +106,26 @@ def catch_target_icd9(df: pd.DataFrame) -> pd.DataFrame:
 
 def propensity_match(
     df: pd.DataFrame,
-    k: int = 3,
+    k: int = 5,
     caliper: Optional[float] = 0.1,
     with_replacement: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     
-    if df.isna().any().any():
-        na_cols = df.columns[df.isna().any()]
-        print(df[na_cols].isna().sum())
-
+    covariates: List[str] = [
+        "AGE_YEARS",
+        "GENDER",
+        "has_HF",
+        "has_acute_K",
+        "has_chronic_K",
+    ]
+    if df[covariates].isna().any().any():
+        na_cols = df[covariates].columns[df[covariates].isna().any()]
+        print(f"有缺失值存在，請檢察:\n{df[na_cols].isna().sum()}")
         return
     # 檢查是否有重複 subject id
     assert df.groupby('SUBJECT_ID').size().max() == 1
 
-    covariates: List[str] = [
-        "age",
-        "GENDER_ENC",
-        "acute_K",
-        "chronic_K",
-        "HF",
-    ]
+    
 
     df_model = df.copy()
     # Logistic regression → propensity
@@ -170,10 +167,9 @@ def propensity_match(
     mort_idx  = [t for t, _ in matched_pairs]
     surv_idx = [c for _, c in matched_pairs]
 
-    matched_mort  = mort_treat.loc[mort_idx]
-    matched_surv = surv_ctrl.loc[surv_idx]
+    matched_mort  = mort_treat.loc[mort_idx].drop_duplicates("SUBJECT_ID")
+    matched_surv = surv_ctrl.loc[surv_idx].drop_duplicates("SUBJECT_ID")
 
-    # 配對後（確保輸出也唯一）
     assert matched_mort['SUBJECT_ID'].is_unique
     assert matched_surv['SUBJECT_ID'].is_unique
 
@@ -183,10 +179,3 @@ def propensity_match(
     matched_mort.to_csv(os.path.join(LOGS,"mort_final.csv"),index=False)
     matched_surv.to_csv(os.path.join(LOGS,"surv_final.csv"),index=False)
     return matched_mort, matched_surv
-
-
-if __name__ == "__main__":
-    target_path = ""
-    df = pd.read_csv(target_path)
-    df_out = catch_target_icd9(df)
-    matched_mort, matched_surv = propensity_match(df_out)
