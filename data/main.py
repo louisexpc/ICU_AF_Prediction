@@ -5,10 +5,14 @@ from typing import List, Dict
 from match import *
 import time
 from feature_selection import feature_selection
-from match import propensity_match
+from match import propensity_match,chi_squared_and_t_test
 from train import train
+import argparse
+import json
+
 LOGS = "./logs"  # 依實際情況修改
 TEST = "test"
+TRAIN = "train_result"
 
 def _ensure_front_cols(df: pd.DataFrame, front=('SUBJECT_ID','HOSPITAL_EXPIRE_FLAG')):
     # 只取存在的欄位，避免 KeyError
@@ -81,7 +85,7 @@ def prepare_feature_selection_datasets(df: pd.DataFrame, prefix: str, time_range
         
 
 
-def main():
+def process(k:int, caliper:float, p_threshold:float):
     mort_hrv = pd.read_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"))
     surv_hrv = pd.read_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"))
 
@@ -106,14 +110,25 @@ def main():
     combined_mort_surv_df = pd.concat([mort_hrv_filtered,surv_hrv_filtered],axis=0).reset_index(drop=True)
     combined_mort_surv_df_with_match_info = catch_target_icd9(combined_mort_surv_df)
    
-    matched_mort, matched_surv = propensity_match(combined_mort_surv_df_with_match_info,k = 3,caliper=0.3)
+    matched_mort, matched_surv = propensity_match(combined_mort_surv_df_with_match_info,k = k,caliper=caliper)
+
+    match_test, overallPass = chi_squared_and_t_test(matched_mort,matched_surv,alpha=0.05)
 
     # mort_hrv_filtered.to_csv(os.path.join(TEST,f"mort_hrv_filtered.csv"),index=False)
     # surv_hrv_filtered.to_csv(os.path.join(TEST,f"surv_hrv_filtered.csv"),index=False)
     # combined_mort_surv_df.to_csv(os.path.join(TEST,f"combined_mort_surv_df.csv"),index=False)
     # combined_mort_surv_df_with_match_info.to_csv(os.path.join(TEST,f"combined_mort_surv_df_with_match_info.csv"),index=False)
 
-    print(f"========= After Matching  =========\nSurv : {len(matched_surv)}\nMort: {len(matched_mort)}")
+    print(f"========= After Matching  =========\nSurv : {len(matched_surv)}\nMort: {len(matched_mort)}\nTest Result: {overallPass}")
+    match_test_path = os.path.join(TRAIN,f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}.json")
+    with open(match_test_path, "w", encoding="utf-8") as f:
+            json.dump(match_test, f, indent=2)
+    if overallPass == False:
+        print("Match Result isn't balanced")
+        
+        return
+
+
 
     print(f"========= Start Prepare Feature Selection Dataset =========")
     TIME_RANGE = ['1_3', '4_6','7_9']
@@ -142,13 +157,24 @@ def main():
             surv_out_lists[i],
             mort_out_lists[i],
             TIME_RANGE[i],
-            p_threshold=0.01
+            p_threshold=p_threshold
         )
-
-        train(surv_feature_df,mort_feature_df,TIME_RANGE[i])
+        summary_fileName = f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}"
+        train(surv_feature_df,mort_feature_df,TIME_RANGE[i],summary_fileName)
         end = time.perf_counter()
         print(f"訓練{TIME_RANGE[i]} Model 執行時間: {end - start:.6f} 秒")
     return
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("-k",required=True)
+    parser.add_argument("-caliper",required=True)
+    parser.add_argument("-p_threshold",required=True)
+
+    args = parser.parse_args()
+
+    process(args.k, args.caliper,args.p_threshold)
 
 if __name__=="__main__":
     main()

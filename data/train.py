@@ -348,9 +348,9 @@ def evaluate_with_cum_confusion_like_CodeB(
             spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
             prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
 
-            print(f"[Seed {seed:02d} | Fold {fold_idx:02d}] "
-                  f"accuracy={acc:.3f}, F1={f1:.3f}, AUC={aucv:.3f}, "
-                  f"Sensitivity={sens:.3f}, Specificity={spec:.3f}, Precision={prec:.3f}")
+            # print(f"[Seed {seed:02d} | Fold {fold_idx:02d}] "
+            #       f"accuracy={acc:.3f}, F1={f1:.3f}, AUC={aucv:.3f}, "
+            #       f"Sensitivity={sens:.3f}, Specificity={spec:.3f}, Precision={prec:.3f}")
 
             # 保存 per-fold
             accuracy_scores.append(acc); f1_scores.append(f1); auc_scores.append(aucv)
@@ -414,7 +414,7 @@ def evaluate_with_cum_confusion_like_CodeB(
     return metrics
 
 
-def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,model_path: str = "svm_final_model.pkl") -> None:
+def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_fileName:str,model_path: str = "svm_final_model.pkl") -> None:
     """
       1) 準備資料（僅 HRV_* + 標籤，dropna/inf）
       2) Stage-1 RandomizedSearchCV（seeds=range(5), n_iter=60）
@@ -470,12 +470,13 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,model_pa
     summary = {
         "stage1_mean_auc": float(auc1),
         "stage2_mean_auc": float(auc2),
+        "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),
         "final_model_path": os.path.abspath(model_path),
         "time_range": time_range,
         # 如果 evaluate 返回 metrics dict，包含它
         "codeB_metrics": codeb_metrics_dict
     }
-    summary_path = os.path.join(save_dir, f"summary_{time_range}.json")
+    summary_path = os.path.join(save_dir, f"{summary_fileName}_{time_range}.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"- Summary saved → {summary_path}")

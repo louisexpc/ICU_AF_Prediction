@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
 import re
+from scipy.stats import chi2_contingency, ttest_ind
 
 LOGS = 'logs'
 DATA_CSV = "origin_data_csv"
@@ -179,3 +180,65 @@ def propensity_match(
     matched_mort.to_csv(os.path.join(LOGS,"mort_final.csv"),index=False)
     matched_surv.to_csv(os.path.join(LOGS,"surv_final.csv"),index=False)
     return matched_mort, matched_surv
+
+
+
+def chi_squared_and_t_test(matched_mort: pd.DataFrame, matched_surv: pd.DataFrame, alpha=0.05):
+    """
+    檢查 Alive 與 Dead 兩組在指定欄位的基線平衡情況 (GENDER : M :0 ; F:1)
+    True = 所有欄位 p 值 > alpha → 基線平衡通過
+    False = 至少一欄 p 值 <= alpha → 基線平衡不通過
+    
+    回傳:
+        results: dict, 各欄位檢定結果與百分比
+        overall_balance: bool, 整體是否通過基線平衡
+    """
+    results = {}
+
+    # 二元類別欄位
+    binary_columns = ['has_acute_K', 'has_chronic_K', 'has_HF',"GENDER"]
+    for col in binary_columns:
+        alive_counts = matched_surv[col].value_counts().sort_index()
+        dead_counts  = matched_mort[col].value_counts().sort_index()
+        table = pd.DataFrame({'Alive': alive_counts, 'Dead': dead_counts}) \
+                    .reindex([0, 1], fill_value=0)  # 確保有 0 和 1 類別
+        
+        chi2, p_val, _, _ = chi2_contingency(table)
+        
+        # 計算 Alive/Dead 中值為 1 的百分比
+        alive_pct_1 = matched_surv[col].value_counts(normalize=True).get(1, 0) * 100
+        dead_pct_1  = matched_mort[col].value_counts(normalize=True).get(1, 0) * 100
+        
+        results[col] = {
+            "p_value": p_val,
+            "balanced": p_val > alpha,
+            "alive_pct_1": alive_pct_1,
+            "dead_pct_1": dead_pct_1
+        }
+
+    # 年齡欄位
+    alive_age = matched_surv['AGE_YEARS'].dropna()
+    dead_age  = matched_mort['AGE_YEARS'].dropna()
+    t_stat, p_value = ttest_ind(alive_age, dead_age, equal_var=False)
+    
+    results['AGE_YEARS'] = {
+        "p_value": p_value,
+        "balanced": p_value > alpha,
+        "alive_mean": alive_age.mean(),
+        "alive_std": alive_age.std(),
+        "dead_mean": dead_age.mean(),
+        "dead_std": dead_age.std()
+    }
+
+    # 判斷整體基線平衡
+    overall_balance = all(v["balanced"] for v in results.values())
+
+    return results, overall_balance
+
+# if __name__=="__main__":
+#     mort = pd.read_csv(os.path.join(LOGS,"mort_final.csv"))
+#     surv = pd.read_csv(os.path.join(LOGS,"surv_final.csv"))
+#     result, overall_balance = chi_squared_and_t_test(mort,surv)
+#     print(f"Passed : {overall_balance}")
+#     print(result)
+
