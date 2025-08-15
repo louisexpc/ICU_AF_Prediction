@@ -124,27 +124,30 @@ def main():
     assert(len(surv_out_lists) == len(mort_out_lists))
 
     print(f"========= Start Feature Selection and Traning=========")
-    start = time.perf_counter()
-    surv_feature_df, mort_feature_df = feature_selection(
-        surv_out_lists[1],
-        mort_out_lists[1],
-        TIME_RANGE[1],
-        p_threshold=0.01
-    )
+    # start = time.perf_counter()
+    # surv_feature_df, mort_feature_df = feature_selection(
+    #     surv_out_lists[1],
+    #     mort_out_lists[1],
+    #     TIME_RANGE[1],
+    #     p_threshold=0.01
+    # )
 
-    train(surv_feature_df,mort_feature_df,TIME_RANGE[1])
-    end = time.perf_counter()
-    print(f"訓練單一時間段執行時間: {end - start:.6f} 秒")
+    # train(surv_feature_df,mort_feature_df,TIME_RANGE[1])
+    # end = time.perf_counter()
+    # print(f"訓練單一時間段執行時間: {end - start:.6f} 秒")
 
-    # for i in range(len(surv_out_lists)):
-    #     surv_feature_df, mort_feature_df = feature_selection(
-    #         surv_out_lists[i],
-    #         mort_out_lists[i],
-    #         TIME_RANGE[i],
-    #         p_threshold=0.01
-    #     )
+    for i in range(len(surv_out_lists)):
+        start = time.perf_counter()
+        surv_feature_df, mort_feature_df = feature_selection(
+            surv_out_lists[i],
+            mort_out_lists[i],
+            TIME_RANGE[i],
+            p_threshold=0.01
+        )
 
-    #     train(surv_feature_df,mort_feature_df,TIME_RANGE[i])
+        train(surv_feature_df,mort_feature_df,TIME_RANGE[i])
+        end = time.perf_counter()
+        print(f"訓練{TIME_RANGE[i]} Model 執行時間: {end - start:.6f} 秒")
     return
 
 if __name__=="__main__":

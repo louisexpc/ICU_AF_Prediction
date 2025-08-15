@@ -77,7 +77,7 @@ def _build_pipeline(balanced: bool) -> Pipeline:
     if balanced:
         svm = SVC(kernel="rbf", probability=True, class_weight="balanced")
     else:
-        svm = SVC(kernel="rbf", probability=True)
+        svm = SVC(kernel="rbf", probability=True, class_weight="balanced")
 
     return Pipeline([
         ("scaler", StandardScaler()),

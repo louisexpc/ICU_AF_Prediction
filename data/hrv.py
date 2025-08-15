@@ -507,7 +507,7 @@ def concat_signals(hdr, rec_dir: str, channel: str="II")->Tuple[float, List, Lis
         try:
             h = wfdb.rdrecord(os.path.join(rec_dir, name)) # including metadata and ecg signal
         except Exception as e:
-            record_log(os.path.split()[-1],f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
+            # record_log(os.path.split()[-1],f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
             # print(f"[ERROR] 無法讀取 {os.path.join(rec_dir, name)}: {e}")
             durations.append(seg_len / hdr.fs)
             segments.append(None)
@@ -573,6 +573,6 @@ if __name__=="__main__":
     mort_result_df = main(mort_target_path,prefix="mort")
     mort_result_df.to_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"),index=False)
 
-    # surv_target_path = os.path.join(LOGS,"surv_stage2_filtered.csv")
-    # surv_result_df = main(surv_target_path,prefix="surv")
-    # surv_result_df.to_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"),index=False)
+    surv_target_path = os.path.join(LOGS,"surv_stage2_filtered.csv")
+    surv_result_df = main(surv_target_path,prefix="surv")
+    surv_result_df.to_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"),index=False)
