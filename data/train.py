@@ -69,21 +69,18 @@ def _prepare_dataset(surv_df: pd.DataFrame, mort_df: pd.DataFrame) -> Tuple[np.n
     return X, y, dataset, total_feature
 
 
-def _build_pipeline(balanced: bool) -> Pipeline:
+def _build_pipeline(model: str = "SVM") -> Pipeline:
     """
     建立 SVM(RBF) 縮放 + 分類 Pipeline。
     - balanced=True  : 與 CodeA 一致（class_weight='balanced'）
     - balanced=False : 與 CodeB 一致（不設定 class_weight）
     """
-    if balanced:
+    if model=="SVM":
         svm = SVC(kernel="rbf", probability=True, class_weight="balanced")
-    else:
-        svm = SVC(kernel="rbf", probability=True, class_weight="balanced")
-
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        ("svm", svm),
-    ])
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("svm", svm),
+        ])
 
 
 # ------------------------------
@@ -152,14 +149,14 @@ def nested_cv(
 # ------------------------------
 # 兩階段搜尋 + 最終存模
 # ------------------------------
-def _stage1_random_search(X: np.ndarray, y: np.ndarray) -> Tuple[float, List[Dict], pd.DataFrame]:
+def _stage1_random_search(X: np.ndarray, y: np.ndarray,model:str = "SVM") -> Tuple[float, List[Dict], pd.DataFrame]:
     """
     Stage-1（與 CodeA 一致）：
     - seeds=range(5), n_iter=60
     - C ~ loguniform(1e-3, 1e3), gamma ~ loguniform(1e-4, 1e1)
     """
     np.random.seed(42)
-    base_pipe_a = _build_pipeline(balanced=True)
+    base_pipe_a = _build_pipeline(model=model)
 
     param_dist_coarse = {
         "svm__C":     loguniform(1e-3, 1e3),
@@ -199,7 +196,7 @@ def _build_fine_grid_from_stage1(stage1_df: pd.DataFrame) -> Dict[str, np.ndarra
 
 
 def _stage2_grid_search_and_finalize(
-    X: np.ndarray, y: np.ndarray, param_grid_fine: Dict[str, np.ndarray], save_dir: str,time_range: str,model_path: str = "svm_final_model.pkl"
+    X: np.ndarray, y: np.ndarray, param_grid_fine: Dict[str, np.ndarray], save_dir: str,time_range: str,model_path: str = "svm_final_model.pkl",model:str="SVM"
 ) -> Tuple[float, Dict, Tuple[np.ndarray, List[np.ndarray]], str]:
     """
     Stage-2（與 CodeA 一致）：
@@ -207,7 +204,7 @@ def _stage2_grid_search_and_finalize(
     - 以眾數參數在全資料重訓並存檔
     - 回傳：Stage-2 mean AUC、final_params、roc_info（供平均 ROC）
     """
-    base_pipe_a = _build_pipeline(balanced=True)
+    base_pipe_a = _build_pipeline(model = model)
 
     print("\n=== Stage-2：GridSearchCV（細搜尋） ===")
     auc2, best_hist2, roc_info2 = nested_cv(
@@ -281,7 +278,8 @@ def evaluate_with_cum_confusion_like_CodeB(
     n_outer: int = 10,
     n_inner: int = 5,
     save_dir: str = TRAIN,
-    time_range: str = None
+    time_range: str = None,
+    model: str = "SVM"
 ) -> Dict[str, float]:
     """
     與 CodeB 一致的評估：
@@ -296,8 +294,14 @@ def evaluate_with_cum_confusion_like_CodeB(
             "svm__C":     np.linspace(2.02, 2.03, 15),
             "svm__gamma": np.linspace(0.018, 0.019, 15),
         }
+    else :
+        param_grid_b = {
+            "svm__C" : np.linspace(param_grid_b['svm__C']-0.05,param_grid_b['svm__C']+0.05,15),
+            "svm__gamma" : np.linspace(param_grid_b['svm__C']-0.0005,param_grid_b['svm__C']+0.0005,15)
+        }
 
-    pipeline_b = _build_pipeline(balanced=False)  # 與 CodeB 一致：不設 class_weight
+    pipeline_b = _build_pipeline(model=model)  
+    print(f"\n=== CodeB 評估：使用參數 ===\n{param_grid_b}")
     print("\n=== CodeB 評估：20×Nested CV + 累加混淆矩陣 ===")
 
     # 收集器
@@ -415,7 +419,7 @@ def evaluate_with_cum_confusion_like_CodeB(
     return metrics
 
 
-def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_fileName:str,model_path: str = "svm_final_model.pkl") -> None:
+def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_fileName:str,model_path: str = "svm_final_model.pkl",model: str = "SVM") -> None:
     """
       1) 準備資料（僅 HRV_* + 標籤，dropna/inf）
       2) Stage-1 RandomizedSearchCV（seeds=range(5), n_iter=60）
@@ -441,46 +445,50 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
     dataset.to_csv(dataset_path, index=False)
     print(f"- dataset saved → {dataset_path}")
 
+    if model == "SVM":
 
-    # === 2) Stage-1（粗搜） ===
-    auc1, best_hist1, stage1_df = _stage1_random_search(X, y)
+        # === 2) Stage-1（粗搜） ===
+        auc1, best_hist1, stage1_df = _stage1_random_search(X, y, model=model)
 
-    stage1_csv = os.path.join(save_dir, f"stage1_best_hist_{time_range}.csv")
-    stage1_df.to_csv(stage1_csv, index=False)
-    print(f"- Stage-1 history saved → {stage1_csv}")
+        stage1_csv = os.path.join(save_dir, f"stage1_best_hist_{time_range}.csv")
+        stage1_df.to_csv(stage1_csv, index=False)
+        print(f"- Stage-1 history saved → {stage1_csv}")
 
-    # === 3) Stage-2（細搜 + 存模） ===
-    param_grid_fine = _build_fine_grid_from_stage1(stage1_df)
-    auc2, final_params, roc_info2 ,model_path_stage2 = _stage2_grid_search_and_finalize(X, y, param_grid_fine,save_dir,time_range, model_path=model_path)
+        # === 3) Stage-2（細搜 + 存模） ===
+        param_grid_fine = _build_fine_grid_from_stage1(stage1_df)
+        auc2, final_params, roc_info2 ,model_path_stage2 = _stage2_grid_search_and_finalize(X, y, param_grid_fine,save_dir,time_range, model_path=model_path, model=model)
 
-    # === 4) 平均 ROC（Stage-2） ===
-    fig_path = os.path.join(save_dir, f"avg_roc_stage2_{time_range}.png")
-    _plot_avg_roc_from_tprs(roc_info2, title="Average ROC – Stage-2 Nested CV", auc_value=auc2,save_path= fig_path)
-    
+        # === 4) 平均 ROC（Stage-2） ===
+        fig_path = os.path.join(save_dir, f"avg_roc_stage2_{time_range}.png")
+        _plot_avg_roc_from_tprs(roc_info2, title="Average ROC – Stage-2 Nested CV", auc_value=auc2,save_path= fig_path)
+        
 
 
-    # === 5) CodeB 評估（與原版一致） ===
-    codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,save_dir=save_dir,time_range=time_range)
+        # === 5) CodeB 評估（與原版一致） ===
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,param_grid_b=final_params,save_dir=save_dir,time_range=time_range,model=model)
 
-    # === Summary ===
-    print("\n=== Summary ===")
-    print(f"Stage-1  mean AUC : {auc1:.4f}")
-    print(f"Stage-2  mean AUC : {auc2:.4f}")
-    print(f"Final model saved : {os.path.abspath(model_path)}")
+        # === Summary ===
+        print("\n=== Summary ===")
+        print(f"Stage-1  mean AUC : {auc1:.4f}")
+        print(f"Stage-2  mean AUC : {auc2:.4f}")
+        print(f"Final model saved : {os.path.abspath(model_path)}")
 
-    summary = {
-        "Match_surv":len(surv_df),
-        "Match_mort":len(mort_df),
-        "features":int(total_features),
-        "stage1_mean_auc": float(auc1),
-        "stage2_mean_auc": float(auc2),
-        "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),
-        "final_model_path": os.path.abspath(model_path),
-        "time_range": time_range,
-        # 如果 evaluate 返回 metrics dict，包含它
-        "codeB_metrics": codeb_metrics_dict
-    }
-    summary_path = os.path.join(save_dir, f"{summary_fileName}_{time_range}.json")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-    print(f"- Summary saved → {summary_path}")
+        summary = {
+            "Match_surv":len(surv_df),
+            "Match_mort":len(mort_df),
+            "features":int(total_features),
+            "stage1_mean_auc": float(auc1),
+            "stage2_mean_auc": float(auc2),
+            "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),
+            "final_model_path": os.path.abspath(model_path),
+            "time_range": time_range,
+            # 如果 evaluate 返回 metrics dict，包含它
+            "codeB_metrics": codeb_metrics_dict
+        }
+        summary_path = os.path.join(save_dir, f"{summary_fileName}_{time_range}.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print(f"- Summary saved → {summary_path}")
+
+    elif model == "XGB":
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,save_dir=save_dir,time_range=time_range)
