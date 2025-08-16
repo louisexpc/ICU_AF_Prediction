@@ -28,6 +28,8 @@ from sklearn.metrics import (
     confusion_matrix, roc_curve
 )
 from scipy.stats import loguniform
+from xgboost import XGBClassifier
+
 TRAIN = "train_result"
 
 def _prepare_dataset(surv_df: pd.DataFrame, mort_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, int]:
@@ -80,6 +82,13 @@ def _build_pipeline(model: str = "SVM") -> Pipeline:
         return Pipeline([
             ("scaler", StandardScaler()),
             ("svm", svm),
+        ])
+    elif model =="XGB":
+        return Pipeline([
+            ('scaler', StandardScaler()),
+            ('xgb', XGBClassifier(
+                eval_metric='logloss'
+            ))
         ])
 
 
@@ -289,19 +298,27 @@ def evaluate_with_cum_confusion_like_CodeB(
     - 20 個 seed × 外層10-fold，內層5-fold
     - 逐 fold 列印指標；最終以「累加混淆矩陣」計算整體指標 + 以全部 y_proba 計算 AUC 與 ROC
     """
-    if param_grid_b is None:
-        param_grid_b = {
-            "svm__C":     np.linspace(2.02, 2.03, 15),
-            "svm__gamma": np.linspace(0.018, 0.019, 15),
-        }
-    else :
-        param_grid_b = {
-            "svm__C" : np.linspace(param_grid_b['svm__C']-0.05,param_grid_b['svm__C']+0.05,15),
-            "svm__gamma" : np.linspace(param_grid_b['svm__C']-0.0005,param_grid_b['svm__C']+0.0005,15)
+    if model == "SVM":
+        if param_grid_b is None:
+            param_grid_b = {
+                "svm__C":     np.linspace(2.02, 2.03, 15),
+                "svm__gamma": np.linspace(0.018, 0.019, 15),
+            }
+        else :
+            param_grid_b = {
+                "svm__C" : np.linspace(param_grid_b['svm__C']-0.05,param_grid_b['svm__C']+0.05,15),
+                "svm__gamma" : np.linspace(param_grid_b['svm__gamma']-0.0005,param_grid_b['svm__gamma']+0.0005,15)
+            }
+    elif model == "XGB":
+        param_grid_b  = {
+            'xgb__n_estimators':   [100, 250],
+            'xgb__max_depth':      [3, 6],
+            'xgb__learning_rate':  [0.01, 0.065],
+            'xgb__gamma':          [0, 3]
         }
 
     pipeline_b = _build_pipeline(model=model)  
-    print(f"\n=== CodeB 評估：使用參數 ===\n{param_grid_b}")
+    print(f"\n=== CodeB 評估：使用參數 ===\nparam_grid : {param_grid_b}\npipeline_b: {pipeline_b}")
     print("\n=== CodeB 評估：20×Nested CV + 累加混淆矩陣 ===")
 
     # 收集器
@@ -445,6 +462,7 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
     dataset.to_csv(dataset_path, index=False)
     print(f"- dataset saved → {dataset_path}")
 
+    print(f"\n=== Modl Info  -- {model} ===")
     if model == "SVM":
 
         # === 2) Stage-1（粗搜） ===
@@ -485,10 +503,21 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
             # 如果 evaluate 返回 metrics dict，包含它
             "codeB_metrics": codeb_metrics_dict
         }
-        summary_path = os.path.join(save_dir, f"{summary_fileName}_{time_range}.json")
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
-        print(f"- Summary saved → {summary_path}")
+        
 
     elif model == "XGB":
-        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,save_dir=save_dir,time_range=time_range)
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,save_dir=save_dir,time_range=time_range,model=model)
+        summary = {
+            "Match_surv":len(surv_df),
+            "Match_mort":len(mort_df),
+            "features":int(total_features),
+            "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),
+            "time_range": time_range,
+            # 如果 evaluate 返回 metrics dict，包含它
+            "codeB_metrics": codeb_metrics_dict
+        }
+    
+    summary_path = os.path.join(save_dir, f"{summary_fileName}_{time_range}_{model}.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"- Summary saved → {summary_path}")

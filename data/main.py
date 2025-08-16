@@ -85,7 +85,7 @@ def prepare_feature_selection_datasets(df: pd.DataFrame, prefix: str, time_range
         
 
 
-def process(k:int, caliper:float, p_threshold:float):
+def process(k:int, caliper:float, p_threshold:float, model:str):
     os.makedirs(TRAIN, exist_ok=True)
     mort_hrv = pd.read_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"))
     surv_hrv = pd.read_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"))
@@ -140,17 +140,7 @@ def process(k:int, caliper:float, p_threshold:float):
     assert(len(surv_out_lists) == len(mort_out_lists))
 
     print(f"========= Start Feature Selection and Traning=========")
-    # start = time.perf_counter()
-    # surv_feature_df, mort_feature_df = feature_selection(
-    #     surv_out_lists[1],
-    #     mort_out_lists[1],
-    #     TIME_RANGE[1],
-    #     p_threshold=0.01
-    # )
 
-    # train(surv_feature_df,mort_feature_df,TIME_RANGE[1])
-    # end = time.perf_counter()
-    # print(f"訓練單一時間段執行時間: {end - start:.6f} 秒")
 
     for i in range(len(surv_out_lists)):
         start = time.perf_counter()
@@ -161,9 +151,10 @@ def process(k:int, caliper:float, p_threshold:float):
             p_threshold=p_threshold
         )
         summary_fileName = f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}"
-        train(surv_feature_df,mort_feature_df,TIME_RANGE[i],summary_fileName)
+        train(surv_feature_df,mort_feature_df,TIME_RANGE[i],summary_fileName,model=model)
         end = time.perf_counter()
         print(f"訓練{TIME_RANGE[i]} Model 執行時間: {end - start:.6f} 秒")
+        break
     return
 
 def main():
@@ -172,11 +163,12 @@ def main():
     parser.add_argument("-k", type=int, required=True)
     parser.add_argument("-caliper", type=float, required=True)
     parser.add_argument("-p_threshold", type=float, required=True)
+    parser.add_argument("-m",type=str,required=True)
 
 
     args = parser.parse_args()
 
-    process(args.k, args.caliper,args.p_threshold)
+    process(args.k, args.caliper,args.p_threshold,args.m)
 
 if __name__=="__main__":
     main()
