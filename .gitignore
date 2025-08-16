@@ -2,3 +2,4 @@ data/*
 !data/*.ipynb
 !data/experiment_data_from_yuran
 !data/*.py
+!data/*.sh

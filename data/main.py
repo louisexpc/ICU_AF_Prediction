@@ -86,6 +86,7 @@ def prepare_feature_selection_datasets(df: pd.DataFrame, prefix: str, time_range
 
 
 def process(k:int, caliper:float, p_threshold:float):
+    os.makedirs(TRAIN, exist_ok=True)
     mort_hrv = pd.read_csv(os.path.join(LOGS,"mort_stage2_filtered_hrv.csv"))
     surv_hrv = pd.read_csv(os.path.join(LOGS,"surv_stage2_filtered_hrv.csv"))
 
@@ -120,7 +121,7 @@ def process(k:int, caliper:float, p_threshold:float):
     # combined_mort_surv_df_with_match_info.to_csv(os.path.join(TEST,f"combined_mort_surv_df_with_match_info.csv"),index=False)
 
     print(f"========= After Matching  =========\nSurv : {len(matched_surv)}\nMort: {len(matched_mort)}\nTest Result: {overallPass}")
-    match_test_path = os.path.join(TRAIN,f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}.json")
+    match_test_path = os.path.join(TRAIN,f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}_match_result.json")
     with open(match_test_path, "w", encoding="utf-8") as f:
             json.dump(match_test, f, indent=2)
     if overallPass == False:
@@ -168,9 +169,10 @@ def process(k:int, caliper:float, p_threshold:float):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-k",required=True)
-    parser.add_argument("-caliper",required=True)
-    parser.add_argument("-p_threshold",required=True)
+    parser.add_argument("-k", type=int, required=True)
+    parser.add_argument("-caliper", type=float, required=True)
+    parser.add_argument("-p_threshold", type=float, required=True)
+
 
     args = parser.parse_args()
 

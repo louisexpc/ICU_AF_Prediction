@@ -30,7 +30,7 @@ from sklearn.metrics import (
 from scipy.stats import loguniform
 TRAIN = "train_result"
 
-def _prepare_dataset(surv_df: pd.DataFrame, mort_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+def _prepare_dataset(surv_df: pd.DataFrame, mort_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, int]:
     """
     整併 surv/mort，僅保留 HRV_* 特徵與標籤欄位（HOSPITAL_EXPIRE_FLAG）。
     - 回傳 X(np.ndarray), y(np.ndarray), dataset(pd.DataFrame for檢視)
@@ -60,12 +60,13 @@ def _prepare_dataset(surv_df: pd.DataFrame, mort_df: pd.DataFrame) -> Tuple[np.n
 
     print("=== Dataset 檢查 ===")
     # print(f"- 原始筆數：{before}  | 移除含 NaN/Inf 筆數：{na_rows}  | 最終可用：{after}")
+    total_feature = len([c for c in dataset.columns if c.startswith('HRV_')])
     print(f"- 特徵數：{len([c for c in dataset.columns if c.startswith('HRV_')])}  | 標籤欄：{label_col}")
 
     X = dataset.drop(columns=[label_col]).values  # 轉 ndarray（與 CodeA 索引方式一致）
     y = dataset[label_col].values.astype(int)
 
-    return X, y, dataset
+    return X, y, dataset, total_feature
 
 
 def _build_pipeline(balanced: bool) -> Pipeline:
@@ -433,7 +434,7 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
         model_path = os.path.join(save_dir, f"{base}_{time_range}{ext}")
 
     # === 1) 準備資料 ===
-    X, y, dataset = _prepare_dataset(surv_df, mort_df)
+    X, y, dataset, total_features = _prepare_dataset(surv_df, mort_df)
     print(f"\n=== Dataset Info ===\n- Total Samples: {len(dataset)} | Features: {X.shape[1]} "
           f"| Surv: {len(surv_df)} | Mort: {len(mort_df)}")
     dataset_path = os.path.join(save_dir, f"dataset_{time_range}.csv")
@@ -468,6 +469,9 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
     print(f"Final model saved : {os.path.abspath(model_path)}")
 
     summary = {
+        "Match_surv":len(surv_df),
+        "Match_mort":len(mort_df),
+        "features":int(total_features),
         "stage1_mean_auc": float(auc1),
         "stage2_mean_auc": float(auc2),
         "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),

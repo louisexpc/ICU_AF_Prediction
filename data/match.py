@@ -210,10 +210,10 @@ def chi_squared_and_t_test(matched_mort: pd.DataFrame, matched_surv: pd.DataFram
         dead_pct_1  = matched_mort[col].value_counts(normalize=True).get(1, 0) * 100
         
         results[col] = {
-            "p_value": p_val,
-            "balanced": p_val > alpha,
-            "alive_pct_1": alive_pct_1,
-            "dead_pct_1": dead_pct_1
+            "p_value": float(p_val),
+            "balanced": bool(p_val > alpha),
+            "alive_pct_1": float(alive_pct_1),
+            "dead_pct_1": float(dead_pct_1)
         }
 
     # 年齡欄位
@@ -222,8 +222,8 @@ def chi_squared_and_t_test(matched_mort: pd.DataFrame, matched_surv: pd.DataFram
     t_stat, p_value = ttest_ind(alive_age, dead_age, equal_var=False)
     
     results['AGE_YEARS'] = {
-        "p_value": p_value,
-        "balanced": p_value > alpha,
+        "p_value": float(p_value),
+        "balanced": bool(p_value > alpha),
         "alive_mean": alive_age.mean(),
         "alive_std": alive_age.std(),
         "dead_mean": dead_age.mean(),
