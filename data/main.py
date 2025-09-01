@@ -104,11 +104,12 @@ def process(k:int, caliper:float, p_threshold:float, model:str):
         surv_hrv['have_7_9_hrv']
     ]
     print(f"========= After Filtering HRV =========\nSurv : {len(surv_hrv_filtered)}\nMort: {len(mort_hrv_filtered)}")
-
+    
 
     print(f"========= Start Match =========")
     combined_mort_surv_df = pd.concat([mort_hrv_filtered,surv_hrv_filtered],axis=0).reset_index(drop=True)
     combined_mort_surv_df_with_match_info = catch_target_icd9(combined_mort_surv_df)
+    combined_mort_surv_df_with_match_info.to_csv(os.path.join(LOGS,"combined_mort_surv_df_with_match_info.csv"),index=False)
 
     # k_lists = [1,2,3,4,5,6,7,8,9,10]
     # caliper_lists = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]    
@@ -138,7 +139,7 @@ def process(k:int, caliper:float, p_threshold:float, model:str):
 
   
     print(f"========= After Matching  =========\nSurv : {len(matched_surv)}\nMort: {len(matched_mort)}\nTest Result: {overallPass}")
-
+    
      
 
     match_test_path = os.path.join(TRAIN,f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}_match_result.json")
@@ -149,6 +150,9 @@ def process(k:int, caliper:float, p_threshold:float, model:str):
         print("Match Result isn't balanced")
         
         return
+    matched_mort.to_csv(os.path.join(LOGS,"mort_match.csv"),index=False)
+    matched_surv.to_csv(os.path.join(LOGS,"surv_match.csv"),index=False)
+    return
 
 
 

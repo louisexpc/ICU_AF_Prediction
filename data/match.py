@@ -177,8 +177,8 @@ def propensity_match(
     print(
         f"Matched Mort: {len(matched_mort)}\nMatched Surv: {len(matched_surv)}"
     )
-    matched_mort.to_csv(os.path.join(LOGS,"mort_final.csv"),index=False)
-    matched_surv.to_csv(os.path.join(LOGS,"surv_final.csv"),index=False)
+    matched_mort.to_csv(os.path.join(LOGS,"mort_match.csv"),index=False)
+    matched_surv.to_csv(os.path.join(LOGS,"surv_match.csv"),index=False)
     return matched_mort, matched_surv
 
 
