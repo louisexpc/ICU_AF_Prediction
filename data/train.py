@@ -18,6 +18,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import json
 from typing import Tuple, Dict, List, Iterable
+from sklearn.linear_model  import LogisticRegression
 
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
@@ -90,6 +91,17 @@ def _build_pipeline(model: str = "SVM") -> Pipeline:
                 eval_metric='logloss'
             ))
         ])
+    elif model =="LR":
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(
+                solver="saga",          # 支援 l1/l2/elastic
+                max_iter=10000,
+                class_weight="balanced" # 處理不平衡
+            ))
+        ])
+    else:
+        raise ValueError(f"{model} not found")
 
 
 # ------------------------------
@@ -167,10 +179,16 @@ def _stage1_random_search(X: np.ndarray, y: np.ndarray,model:str = "SVM") -> Tup
     np.random.seed(42)
     base_pipe_a = _build_pipeline(model=model)
 
-    param_dist_coarse = {
-        "svm__C":     loguniform(1e-3, 1e3),
-        "svm__gamma": loguniform(1e-4, 1e1),
-    }
+    if model == "SVM":
+        param_dist_coarse = {
+            "svm__C":     loguniform(1e-3, 1e3),
+            "svm__gamma": loguniform(1e-4, 1e1),
+        }
+    elif model == "LR":
+        param_dist_coarse = {
+            "clf__C": loguniform(1e-4, 1e4),
+            "clf__penalty": ["l1", "l2"],      # 拿掉 elasticnet
+        }
 
     print("\n=== Stage-1：RandomizedSearchCV（粗搜尋） ===")
     auc1, best_hist1, _ = nested_cv(
@@ -189,7 +207,7 @@ def _stage1_random_search(X: np.ndarray, y: np.ndarray,model:str = "SVM") -> Tup
 
 def _build_fine_grid_from_stage1(stage1_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     """
-    與 CodeA 一致：
+    Only For SVM
     - 以 Stage-1 眾數（此處取 median of log）為中心，±1 decade，9點對數等距
     """
     logC_center = np.log10(stage1_df["svm__C"]).median()
@@ -239,7 +257,20 @@ def _stage2_grid_search_and_finalize(
     print(f"- Stage-2 history saved → {stage2_csv}")
 
     # 儲存 final_params
-    final_params_serializable = {k: (int(v) if np.issubdtype(type(v), np.integer) else float(v)) for k, v in final_params.items()}
+    # safer serialization
+    final_params_serializable = {}
+    for k, v in final_params.items():
+        if isinstance(v, (np.integer, int)):
+            final_params_serializable[k] = int(v)
+        elif isinstance(v, (np.floating, float, np.float64)):
+            final_params_serializable[k] = float(v)
+        else:
+            # keep strings, lists, bools as-is (convert numpy arrays to python lists if needed)
+            if isinstance(v, np.ndarray):
+                final_params_serializable[k] = v.tolist()
+            else:
+                final_params_serializable[k] = v
+
     params_path = os.path.join(save_dir, f"final_params_{time_range}.json")
     with open(params_path, "w", encoding="utf-8") as f:
         json.dump(final_params_serializable, f, indent=2)
@@ -281,6 +312,7 @@ def _plot_avg_roc_from_tprs(roc_info: Tuple[np.ndarray, List[np.ndarray]], title
 def evaluate_with_cum_confusion_like_CodeB(
     X: np.ndarray,
     y: np.ndarray,
+    summary_fileName:str,
     param_grid_b: Dict[str, np.ndarray] = None,
     prob_threshold: float = 0.110,
     seeds: Iterable[int] = range(20),
@@ -316,6 +348,21 @@ def evaluate_with_cum_confusion_like_CodeB(
             'xgb__learning_rate':  [0.01, 0.065],
             'xgb__gamma':          [0, 3]
         }
+    elif model == "LR":
+        if param_grid_b is None:
+            param_grid_b = {
+                "clf__C":np.logspace(-4, 4, 9),
+                "clf__penalty":['l2']
+            }
+        else:
+            C_center = float(param_grid_b['clf__C'])
+            C_grid = np.logspace(np.log10(C_center)-1, np.log10(C_center)+1, 11)
+            pen = param_grid_b['clf__penalty']
+            if isinstance(pen, (list, tuple, np.ndarray)):
+                penalties = list(pen)
+            else:
+                penalties = [pen]
+            param_grid_b = {"clf__C": C_grid, "clf__penalty": penalties}
 
     pipeline_b = _build_pipeline(model=model)  
     print(f"\n=== CodeB 評估：使用參數 ===\nparam_grid : {param_grid_b}\npipeline_b: {pipeline_b}")
@@ -411,9 +458,9 @@ def evaluate_with_cum_confusion_like_CodeB(
     plt.plot([0, 1], [0, 1], "k--", label="Chance level")
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("Receiver Operating Characteristic curve (20×Nested CV)")
+    plt.title(f" {model} ROC Curve (20×Nested CV)")
     plt.legend()
-    roc_fig_path = os.path.join(save_dir, f"roc_codeB_{time_range}.png")
+    roc_fig_path = os.path.join(save_dir, f"{summary_fileName}_roc_{time_range}.png")
     plt.savefig(roc_fig_path)
     plt.close()
     print(f"- CodeB ROC saved → {roc_fig_path}")
@@ -427,7 +474,7 @@ def evaluate_with_cum_confusion_like_CodeB(
         "specificity": spec_total,
         "precision": prec_total,
     }
-    metrics_path = os.path.join(save_dir, f"codeB_metrics_{time_range}.json")
+    metrics_path = os.path.join(save_dir, f"{summary_fileName}_evaluation_metrics_{time_range}.json")
     metrics_serializable = {k: float(v) for k,v in metrics.items()}
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics_serializable, f, indent=2)
@@ -436,7 +483,7 @@ def evaluate_with_cum_confusion_like_CodeB(
     return metrics
 
 
-def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_fileName:str,model_path: str = "svm_final_model.pkl",model: str = "SVM") -> None:
+def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_fileName:str,model_path: str = None,model: str = "SVM") -> None:
     """
       1) 準備資料（僅 HRV_* + 標籤，dropna/inf）
       2) Stage-1 RandomizedSearchCV（seeds=range(5), n_iter=60）
@@ -448,7 +495,7 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
     save_dir = TRAIN
 
     if model_path is None:
-        model_path = os.path.join(save_dir, f"svm_final_model_{time_range}.pkl")
+        model_path = os.path.join(save_dir, f"{summary_fileName}_{model}_final_model_{time_range}.pkl")
     else:
         # 若給相對/絕對路徑，也在檔名結尾加 time_range
         base, ext = os.path.splitext(os.path.basename(model_path))
@@ -477,13 +524,13 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
         auc2, final_params, roc_info2 ,model_path_stage2 = _stage2_grid_search_and_finalize(X, y, param_grid_fine,save_dir,time_range, model_path=model_path, model=model)
 
         # === 4) 平均 ROC（Stage-2） ===
-        fig_path = os.path.join(save_dir, f"avg_roc_stage2_{time_range}.png")
-        _plot_avg_roc_from_tprs(roc_info2, title="Average ROC – Stage-2 Nested CV", auc_value=auc2,save_path= fig_path)
+        fig_path = os.path.join(save_dir, f"{summary_fileName}_avg_roc_stage2_{time_range}.png")
+        _plot_avg_roc_from_tprs(roc_info2, title=f"{model} {time_range} Average ROC – Stage-2", auc_value=auc2,save_path= fig_path)
         
 
 
         # === 5) CodeB 評估（與原版一致） ===
-        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,param_grid_b=final_params,save_dir=save_dir,time_range=time_range,model=model)
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y, summary_fileName,param_grid_b=final_params,save_dir=save_dir,time_range=time_range,model=model)
 
         # === Summary ===
         print("\n=== Summary ===")
@@ -503,10 +550,51 @@ def train(surv_df: pd.DataFrame, mort_df: pd.DataFrame, time_range :str,summary_
             # 如果 evaluate 返回 metrics dict，包含它
             "codeB_metrics": codeb_metrics_dict
         }
+    elif model =="LR":
+        # === 2) Stage-1（粗搜） ===
+        auc1, best_hist1, stage1_df = _stage1_random_search(X, y, model=model)
+
+        # === 3) Stage-2（細搜 + 存模） ===
+        stage1_best_hist_df = pd.DataFrame(best_hist1)
+        best_penalty = stage1_best_hist_df["clf__penalty"].mode()[0]
+        logC_med     = np.log10(stage1_best_hist_df["clf__C"]).median()
+
+        C_fine = np.logspace(logC_med-1, logC_med+1, 11)  # 1 log10 寬；11 點
+        param_grid_fine = {"clf__C": C_fine, "clf__penalty": [best_penalty]}
+
+        auc2, final_params, roc_info2 ,model_path_stage2 = _stage2_grid_search_and_finalize(X, y, param_grid_fine,save_dir,time_range, model_path=model_path, model=model)
+
+        # === 4) 平均 ROC（Stage-2） ===
+        fig_path = os.path.join(save_dir, f"{summary_fileName}_avg_roc_stage2_{time_range}.png")
+        _plot_avg_roc_from_tprs(roc_info2, title=f"{model} {time_range} Average ROC – Stage-2", auc_value=auc2,save_path= fig_path)
         
+        # === 5) CodeB 評估（與原版一致） ===
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,summary_fileName,param_grid_b=final_params,save_dir=save_dir,time_range=time_range,model=model)
+
+        # === Summary ===
+        print("\n=== Summary ===")
+        print(f"Stage-1  mean AUC : {auc1:.4f}")
+        print(f"Stage-2  mean AUC : {auc2:.4f}")
+        print(f"Final model saved : {os.path.abspath(model_path)}")
+
+        summary = {
+            "Match_surv":len(surv_df),
+            "Match_mort":len(mort_df),
+            "features":int(total_features),
+            "stage1_mean_auc": float(auc1),
+            "stage2_mean_auc": float(auc2),
+            "Evaluation_mean_auc":float(codeb_metrics_dict['auc']),
+            "final_model_path": os.path.abspath(model_path),
+            "time_range": time_range,
+            # 如果 evaluate 返回 metrics dict，包含它
+            "codeB_metrics": codeb_metrics_dict
+        }
+
+
+
 
     elif model == "XGB":
-        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,save_dir=save_dir,time_range=time_range,model=model)
+        codeb_metrics_dict = evaluate_with_cum_confusion_like_CodeB(X, y,summary_fileName,save_dir=save_dir,time_range=time_range,model=model)
         summary = {
             "Match_surv":len(surv_df),
             "Match_mort":len(mort_df),
