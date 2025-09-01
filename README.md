@@ -155,3 +155,8 @@ If any part of the task or assumptions is unclear, ask for clarification before 
 ---
 reply in traditional Chinese
 ```
+
+# Issues
+- 如果用 ECG 紀錄的最後一筆去抓有可能沒有對應的 ICU 紀錄
+    - Update 應該用最後一筆 ICUSTAY 紀錄去抓有沒有對應的 ECG MATCH Record
+- 有可能
