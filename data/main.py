@@ -107,23 +107,44 @@ def process(k:int, caliper:float, p_threshold:float, model:str):
 
 
     print(f"========= Start Match =========")
-    
     combined_mort_surv_df = pd.concat([mort_hrv_filtered,surv_hrv_filtered],axis=0).reset_index(drop=True)
     combined_mort_surv_df_with_match_info = catch_target_icd9(combined_mort_surv_df)
+
+    # k_lists = [1,2,3,4,5,6,7,8,9,10]
+    # caliper_lists = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]    
+    # max_total = 0
+    # total_mort = None
+    # total_surv = None
+
+    # for k in k_lists:
+    #     for caliper in caliper_lists:
+    #         matched_mort, matched_surv = propensity_match(combined_mort_surv_df_with_match_info,k = k,caliper=caliper)
+    #         match_test, overallPass = chi_squared_and_t_test(matched_mort,matched_surv,alpha=0.05)
+    #         if overallPass == False:
+    #             print(f"Match Result isn't balanced for k={k}, caliper={caliper}")
+    #             continue
+    #         if len(matched_surv)  + len(matched_mort)> max_total:
+    #             max_total = len(matched_surv)  + len(matched_mort)
+    #             best_k = k
+    #             best_caliper = caliper
+    #             total_mort = len(matched_mort)
+    #             total_surv = len(matched_surv)
+    # print(f"Best Match Result: k={best_k}, caliper={best_caliper},  total samples : {max_total} , total mort: {total_mort}, total surv: {total_surv}")
+    
    
     matched_mort, matched_surv = propensity_match(combined_mort_surv_df_with_match_info,k = k,caliper=caliper)
 
     match_test, overallPass = chi_squared_and_t_test(matched_mort,matched_surv,alpha=0.05)
 
-    # mort_hrv_filtered.to_csv(os.path.join(TEST,f"mort_hrv_filtered.csv"),index=False)
-    # surv_hrv_filtered.to_csv(os.path.join(TEST,f"surv_hrv_filtered.csv"),index=False)
-    # combined_mort_surv_df.to_csv(os.path.join(TEST,f"combined_mort_surv_df.csv"),index=False)
-    # combined_mort_surv_df_with_match_info.to_csv(os.path.join(TEST,f"combined_mort_surv_df_with_match_info.csv"),index=False)
-
+  
     print(f"========= After Matching  =========\nSurv : {len(matched_surv)}\nMort: {len(matched_mort)}\nTest Result: {overallPass}")
+
+     
+
     match_test_path = os.path.join(TRAIN,f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}_match_result.json")
     with open(match_test_path, "w", encoding="utf-8") as f:
             json.dump(match_test, f, indent=2)
+            
     if overallPass == False:
         print("Match Result isn't balanced")
         
@@ -150,11 +171,11 @@ def process(k:int, caliper:float, p_threshold:float, model:str):
             TIME_RANGE[i],
             p_threshold=p_threshold
         )
-        summary_fileName = f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}"
+        summary_fileName = f"k_{k}_caliper_{caliper}_pthreshold_{p_threshold}_{model}"
         train(surv_feature_df,mort_feature_df,TIME_RANGE[i],summary_fileName,model=model)
         end = time.perf_counter()
         print(f"訓練{TIME_RANGE[i]} Model 執行時間: {end - start:.6f} 秒")
-        break
+        
     return
 
 def main():
